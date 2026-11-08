@@ -1,0 +1,81 @@
+---
+name: Java CI
+on:
+  push:
+    branches:
+      - development
+      - staging
+      - production
+jobs:
+  build-and-push:
+    name: Build and Push to ECR & ECS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          token: ${{secrets.PAT}}
+      - name: Set up repository name
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: REPOSITORY
+      - name: Automatic Tagging of Releases
+        id: increment-git-tag
+        run: |
+          bash ./build/git_update.sh -v patch ${{secrets[env.REPOSITORY_NAME]}}
+      - name: Set up access secret file
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: AWS_ACCESS_KEY
+      - name: Set up secret key file
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: AWS_SECRET_KEY
+      - name: Set up cluster name
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: CLUSTER
+      - name: Set up region name
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: REGION
+      - name: Set up ECS service name
+        uses: noliran/branch-based-secrets@v1
+        with:
+          secrets: ECS_SERVICE
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[env.AWS_ACCESS_KEY_NAME] }}
+          aws-secret-access-key: ${{ secrets[env.AWS_SECRET_KEY_NAME] }}
+          aws-region: ${{ secrets[env.REGION_NAME] }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build Docker image
+        env: 
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry}}/${{secrets[env.ECS_SERVICE_NAME]}}:${{steps.increment-git-tag.outputs.git-tag }}
+        run: |
+          echo "Building Docker image $IMAGE_URI"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          echo "Pushed image to ECR at $IMAGE_URI" 
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${{ secrets.TASK_DF_NAME }})
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq  --arg IMAGE "$IMAGE_URI" '.taskDefinition | .containerDefinitions[0].image = $IMAGE |
+          del(.taskDefinitionArn) |del(.revision)
+          | del(.status) | del(.requiresAttributes) | del(.compatibilities) | del(.registeredBy) | del(.registeredAt)')
+          
+          TASK_DF_NAME="web-task-log"
+          REGISTERED_TASK_DEFINITION=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEFINITION")
+          NEW_REVISION=$(echo $REGISTERED_TASK_DEFINITION | jq '.taskDefinition.revision')
+          aws ecs update-service --cluster web-cluster-log --service web-service-log --task-definition "$TASK_DF_NAME:$NEW_REVISION"
+          
+          
+      - name: Deploy to ECS
+        uses: imehedi/actions-awscli-v2@latest
+        with:
+          args: ecs update-service --cluster web-cluster-log  --service web-service-log  --force-new-deployment
+          env:
+          aws-access-key-id: ${{ secrets[env.AWS_ACCESS_KEY_NAME] }}
+          aws-secret-access-key: ${{ secrets[env.AWS_SECRET_KEY_NAME] }}
+          aws-region: ${{ secrets[env.REGION_NAME] }}
